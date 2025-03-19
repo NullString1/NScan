@@ -1,8 +1,25 @@
-use clap::Parser;
+use std::fmt::Display;
+use clap::{Parser, ValueEnum};
 use pnet::{
-    packet::tcp,
+    packet::{ip, tcp},
     transport::tcp_packet_iter,
 };
+
+#[derive(Debug, Clone, ValueEnum)]
+enum ScanType {
+    Syn,
+    Connect,
+}
+
+impl Display for ScanType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ScanType::Syn => write!(f, "SYN"),
+            ScanType::Connect => write!(f, "Connect"),
+        }
+    }
+}
+
 // Rust port scanner
 #[derive(Parser)]
 struct Cli {
@@ -12,6 +29,10 @@ struct Cli {
     // Port to scan
     #[clap(short, long, default_value = "80")]
     port: u16,
+
+    // Scan type
+    #[clap(short, long, default_value = "syn")]
+    scan_type: ScanType,
 }
 
 fn scan_syn(ip: std::net::Ipv4Addr, port: u16) -> bool {
@@ -70,7 +91,8 @@ fn scan_syn(ip: std::net::Ipv4Addr, port: u16) -> bool {
 
 fn scan_connect(ip: std::net::Ipv4Addr, port: u16) -> bool {
     let socket_addr = std::net::SocketAddr::new(ip.into(), port);
-    let socket = std::net::TcpStream::connect_timeout(&socket_addr, std::time::Duration::from_secs(1));
+    let socket =
+        std::net::TcpStream::connect_timeout(&socket_addr, std::time::Duration::from_secs(1));
     match socket {
         Ok(_) => {
             println!("Port {} is open", port);
@@ -83,10 +105,18 @@ fn scan_connect(ip: std::net::Ipv4Addr, port: u16) -> bool {
     }
 }
 
+fn scan(ip: std::net::Ipv4Addr, port: u16, scan_type: ScanType) -> bool {
+    match scan_type {
+        ScanType::Syn => scan_syn(ip, port),
+        ScanType::Connect => scan_connect(ip, port),
+    }
+}
 
 fn main() {
     let args = Cli::parse();
-    println!("Scanning to {} on port {}", args.ip, args.port);
-    scan_syn(args.ip, args.port);
-    //scan_connect(args.ip, args.port);
+    println!(
+        "Scanning {} on port {} using method {}",
+        args.ip, args.port, args.scan_type
+    );
+    scan(args.ip, args.port, args.scan_type);
 }
