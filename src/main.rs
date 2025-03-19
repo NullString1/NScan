@@ -1,17 +1,14 @@
+use cidr::{Ipv4Cidr, Ipv6Cidr};
 use clap::{Parser, ValueEnum};
 use pnet::{
-    packet::ip::IpNextHeaderProtocols,
-    packet::tcp,
+    packet::{ip::IpNextHeaderProtocols, tcp::{self, TcpOption}},
     transport::{tcp_packet_iter, TransportChannelType, TransportProtocol},
 };
 use std::{
-    error::Error,
-    fmt::Display,
-    net::{IpAddr, Ipv4Addr, Ipv6Addr, ToSocketAddrs},
-    vec::IntoIter,
+    error::Error, fmt::Display, net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, ToSocketAddrs}, vec::IntoIter
 };
 
-#[derive(Debug, Clone, ValueEnum, PartialEq)]
+#[derive(Debug, Clone, ValueEnum, PartialEq, Copy)]
 enum ScanType {
     Syn,
     Connect,
@@ -31,7 +28,7 @@ impl Display for ScanType {
 // Rust port scanner
 #[derive(Parser)]
 struct Cli {
-    // Ip address to scan
+    // IP address, hostname, or CIDR range to scan
     #[clap(short = 'H', long)]
     host: String,
 
@@ -70,18 +67,37 @@ fn scan_raw_ipv4(
         TransportChannelType::Layer4(TransportProtocol::Ipv4(IpNextHeaderProtocols::Tcp));
     let (mut tx, mut rx) = pnet::transport::transport_channel(1024, protocol)?;
 
-    let mut buf = [0u8; tcp::TcpPacket::minimum_packet_size()];
+    let mut buf = [0u8; 60];
     let mut packet = tcp::MutableTcpPacket::new(&mut buf).unwrap();
 
-    let src_port = rand::random::<u16>();
+    let src_ip = match get_source_ip_for_target(&ip.into()) {
+        Ok(src) => {
+            match src {
+                IpAddr::V4(ip) => ip,
+                _ => return Err("Could not get source IP address".into()),
+            }
+        },
+        Err(_) => return Err("Could not get source IP address".into()),
+    };
+    let src_port = rand::random_range(49152..65534); // ephemeral ports
 
     packet.set_destination(port);
     packet.set_source(src_port);
     packet.set_sequence(rand::random::<u32>());
     packet.set_acknowledgement(0);
     packet.set_reserved(0);
-    packet.set_options(&[]);
-    packet.set_data_offset(5);
+    let tcp_options = [
+        TcpOption::mss(65495),
+        TcpOption::sack_perm(),
+        TcpOption::timestamp(rand::random::<u32>(), 0),
+        TcpOption::nop(),
+        TcpOption::nop(),
+        TcpOption::wscale(7),
+    ];
+    packet.set_data_offset(12); // at least 5
+    packet.set_options(&tcp_options);
+    packet.set_window(65495);
+
     if scan_type == ScanType::Fin {
         packet.set_flags(tcp::TcpFlags::FIN);
     } else if scan_type == ScanType::Syn {
@@ -89,9 +105,8 @@ fn scan_raw_ipv4(
     } else {
         return Err("Connect scan not supported for raw packets".into());
     }
-    packet.set_window(64240);
-
-    let checksum = tcp::ipv4_checksum(&packet.to_immutable(), &ip, &ip);
+    
+    let checksum = tcp::ipv4_checksum(&packet.to_immutable(), &src_ip, &ip);
     packet.set_checksum(checksum);
 
     tx.send_to(packet.to_immutable(), ip.into())
@@ -137,6 +152,35 @@ fn scan_raw_ipv4(
     }
 }
 
+fn get_source_ip_for_target(target: &IpAddr) -> Result<IpAddr, Box<dyn std::error::Error>> {
+    if target.is_loopback() {
+        if target.is_ipv6() {
+            return Ok(IpAddr::V6(Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0, 1)));
+        }
+        return Ok(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)));
+    }
+    let bind = match target.is_ipv4() {
+        true => "0.0.0.0:0",
+        false => "[::]:0",
+    };
+    match std::net::UdpSocket::bind(bind) {
+        Ok(socket) => {
+            match socket.connect(SocketAddr::new(target.clone().into(), 53)) {
+                Ok(_) => {
+                    return Ok(socket.local_addr()?.ip());
+                }
+                Err(_) => {
+                    return Err("Could not connect to target".into());
+                }
+            }
+        }
+        Err(_) => {
+            return Err("Could not bind to local address".into());
+        }
+    }
+}
+
+
 fn scan_raw_ipv6(
     ip: Ipv6Addr,
     port: u16,
@@ -147,18 +191,36 @@ fn scan_raw_ipv6(
         TransportChannelType::Layer4(TransportProtocol::Ipv6(IpNextHeaderProtocols::Tcp));
     let (mut tx, mut rx) = pnet::transport::transport_channel(1024, protocol)?;
 
-    let mut buf = [0u8; tcp::TcpPacket::minimum_packet_size()];
+    let mut buf = [0u8; 60];
     let mut packet = tcp::MutableTcpPacket::new(&mut buf).unwrap();
 
-    let src_port = rand::random::<u16>();
+    let src_ip = match get_source_ip_for_target(&ip.into()) {
+        Ok(src) => {
+            match src {
+                IpAddr::V6(ip) => ip,
+                _ => return Err("Could not get source IP address".into()),
+            }
+        },
+        Err(_) => return Err("Could not get source IP address".into()),
+    };
+    let src_port = rand::random_range(49152..65534); // ephemeral ports
 
     packet.set_destination(port);
     packet.set_source(src_port);
     packet.set_sequence(rand::random::<u32>());
     packet.set_acknowledgement(0);
     packet.set_reserved(0);
-    packet.set_options(&[]);
-    packet.set_data_offset(5);
+    let tcp_options = [
+        TcpOption::mss(65495),
+        TcpOption::sack_perm(),
+        TcpOption::timestamp(rand::random::<u32>(), 0),
+        TcpOption::nop(),
+        TcpOption::nop(),
+        TcpOption::wscale(7),
+    ];
+    packet.set_data_offset(12); // at least 5
+    packet.set_options(&tcp_options);
+    packet.set_window(65495);
     if scan_type == ScanType::Fin {
         packet.set_flags(tcp::TcpFlags::FIN);
     } else if scan_type == ScanType::Syn {
@@ -166,9 +228,8 @@ fn scan_raw_ipv6(
     } else {
         return Err("Connect scan not supported for raw packets".into());
     }
-    packet.set_window(64240);
 
-    let checksum = tcp::ipv6_checksum(&packet.to_immutable(), &ip, &ip);
+    let checksum = tcp::ipv6_checksum(&packet.to_immutable(), &src_ip, &ip);
     packet.set_checksum(checksum);
 
     tx.send_to(packet.to_immutable(), ip.into())
@@ -240,6 +301,53 @@ fn scan(ip: IpAddr, port: u16, scan_type: ScanType, timeout: u8) -> Result<bool,
     }
 }
 
+/// Expands a CIDR range into individual IP addresses
+fn expand_cidr(cidr_str: &str) -> Result<Vec<IpAddr>, Box<dyn Error>> {
+    // Try parsing as IPv4 CIDR first
+    if let Ok(ipv4_cidr) = cidr_str.parse::<Ipv4Cidr>() {
+        let hosts: Vec<IpAddr> = ipv4_cidr
+            .iter()
+            .map(|ip| ip.address().into())
+            .collect();
+        return Ok(hosts);
+    }
+
+    // If not IPv4, try parsing as IPv6 CIDR
+    if let Ok(ipv6_cidr) = cidr_str.parse::<Ipv6Cidr>() {
+        // Limit the number of IPv6 addresses to avoid too many scans
+        let prefix_len = ipv6_cidr.network_length();
+        if prefix_len < 120 {
+            return Err(format!("IPv6 CIDR with prefix length < 120 not supported to avoid too many scans (got /{})", prefix_len).into());
+        }
+
+        let hosts: Vec<IpAddr> = ipv6_cidr
+            .iter()
+            .map(|ip| ip.address().into())
+            .collect();
+        return Ok(hosts);
+    }
+
+    Err(format!("Invalid CIDR notation: {}", cidr_str).into())
+}
+
+/// Checks if the input is a CIDR notation
+fn is_cidr(input: &str) -> bool {
+    input.contains("/")
+}
+
+/// Parses a hostname, IP address, or CIDR range into a list of IP addresses
+fn parse_target(target: &str) -> Result<Vec<IpAddr>, Box<dyn Error>> {
+    if is_cidr(target) {
+        expand_cidr(target)
+    } else {
+        // Try to parse as a single IP address or hostname
+        match hostname_to_ip(&target.to_string()) {
+            Ok(ip) => Ok(vec![ip]),
+            Err(e) => Err(e),
+        }
+    }
+}
+
 fn hostname_to_ip(hostname: &String) -> Result<IpAddr, Box<dyn Error>> {
     // Try to parse as IP address first
     if let Ok(ip) = hostname.parse::<IpAddr>() {
@@ -263,13 +371,32 @@ fn hostname_to_ip(hostname: &String) -> Result<IpAddr, Box<dyn Error>> {
 
 fn main() {
     let args = Cli::parse();
-    let ip = hostname_to_ip(&args.host).unwrap();
-    println!(
-        "Scanning {} ({}) on port {} using method {} with timeout {} seconds",
-        args.host, ip, args.port, args.scan_type, args.timeout
-    );
-    match scan(ip, args.port, args.scan_type, args.timeout) {
-        Ok(_) => {}
-        Err(e) => eprintln!("Error: {}", e),
+    
+    let target_ips = match parse_target(&args.host) {
+        Ok(ips) => ips,
+        Err(e) => {
+            eprintln!("Error parsing target: {}", e);
+            return;
+        }
+    };
+    
+    let total_ips = target_ips.len();
+    if total_ips > 1 {
+        println!("Scanning {} IP addresses in range {}", total_ips, args.host);
+    }
+    
+    for (idx, ip) in target_ips.iter().enumerate() {
+        if total_ips > 1 {
+            println!("[{}/{}] Scanning {} on port {} using method {} with timeout {} seconds",
+                idx + 1, total_ips, ip, args.port, args.scan_type, args.timeout);
+        } else {
+            println!("Scanning {} on port {} using method {} with timeout {} seconds",
+                ip, args.port, args.scan_type, args.timeout);
+        }
+        
+        match scan(*ip, args.port, args.scan_type, args.timeout) {
+            Ok(_) => {},
+            Err(e) => eprintln!("Error: {}", e),
+        }
     }
 }
