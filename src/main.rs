@@ -1,6 +1,10 @@
 use clap::{Parser, ValueEnum};
-use pnet::{packet::tcp, transport::tcp_packet_iter};
-use std::{error::Error, fmt::Display, net::ToSocketAddrs, vec::IntoIter};
+use pnet::{
+    packet::tcp,
+    packet::ip::IpNextHeaderProtocols,
+    transport::{tcp_packet_iter, TransportChannelType, TransportProtocol},
+};
+use std::{error::Error, fmt::Display, net::{IpAddr, ToSocketAddrs, Ipv4Addr, Ipv6Addr}, vec::IntoIter};
 
 #[derive(Debug, Clone, ValueEnum)]
 enum ScanType {
@@ -33,9 +37,16 @@ struct Cli {
     scan_type: ScanType,
 }
 
-fn scan_syn(ip: std::net::Ipv4Addr, port: u16) -> Result<bool, Box<dyn std::error::Error>> {
-    let protocol = pnet::transport::TransportChannelType::Layer4(
-        pnet::transport::TransportProtocol::Ipv4(pnet::packet::ip::IpNextHeaderProtocols::Tcp),
+fn scan_syn(ip: IpAddr, port: u16) -> Result<bool, Box<dyn std::error::Error>> {
+    match ip {
+        IpAddr::V4(ipv4) => scan_syn_ipv4(ipv4, port),
+        IpAddr::V6(ipv6) => scan_syn_ipv6(ipv6, port),
+    }
+}
+
+fn scan_syn_ipv4(ip: Ipv4Addr, port: u16) -> Result<bool, Box<dyn std::error::Error>> {
+    let protocol = TransportChannelType::Layer4(
+        TransportProtocol::Ipv4(IpNextHeaderProtocols::Tcp),
     );
     let (mut tx, mut rx) = pnet::transport::transport_channel(1024, protocol)?;
 
@@ -86,8 +97,61 @@ fn scan_syn(ip: std::net::Ipv4Addr, port: u16) -> Result<bool, Box<dyn std::erro
     }
 }
 
-fn scan_connect(ip: std::net::Ipv4Addr, port: u16) -> bool {
-    let socket_addr = std::net::SocketAddr::new(ip.into(), port);
+fn scan_syn_ipv6(ip: Ipv6Addr, port: u16) -> Result<bool, Box<dyn std::error::Error>> {
+    let protocol = TransportChannelType::Layer4(
+        TransportProtocol::Ipv6(IpNextHeaderProtocols::Tcp),
+    );
+    let (mut tx, mut rx) = pnet::transport::transport_channel(1024, protocol)?;
+
+    let mut buf = [0u8; tcp::TcpPacket::minimum_packet_size()];
+    let mut packet = tcp::MutableTcpPacket::new(&mut buf).unwrap();
+
+    let src_port = rand::random::<u16>();
+
+    packet.set_destination(port);
+    packet.set_source(src_port);
+    packet.set_sequence(rand::random::<u32>());
+    packet.set_acknowledgement(0);
+    packet.set_reserved(0);
+    packet.set_options(&[]);
+    packet.set_data_offset(5);
+    packet.set_flags(tcp::TcpFlags::SYN);
+    packet.set_window(64240);
+
+    let checksum = tcp::ipv6_checksum(&packet.to_immutable(), &ip, &ip);
+    packet.set_checksum(checksum);
+
+    tx.send_to(packet.to_immutable(), ip.into())
+        .expect("Could not send packet");
+
+    loop {
+        let mut res = tcp_packet_iter(&mut rx);
+        let result = res
+            .next_with_timeout(std::time::Duration::from_secs(1))
+            .expect("Failed to receive packet");
+        match result {
+            Some(p) => {
+                let packet = p.0;
+                if packet.get_destination() == src_port && packet.get_source() == port {
+                    if packet.get_flags() == tcp::TcpFlags::SYN | tcp::TcpFlags::ACK {
+                        println!("Port {} is open", port);
+                        return Ok(true);
+                    } else {
+                        println!("Port {} is closed", port);
+                        return Ok(false);
+                    }
+                }
+            }
+            None => {
+                println!("Port {} is filtered", port);
+                return Ok(false);
+            }
+        }
+    }
+}
+
+fn scan_connect(ip: IpAddr, port: u16) -> bool {
+    let socket_addr = std::net::SocketAddr::new(ip, port);
     let socket =
         std::net::TcpStream::connect_timeout(&socket_addr, std::time::Duration::from_secs(1));
     match socket {
@@ -102,33 +166,32 @@ fn scan_connect(ip: std::net::Ipv4Addr, port: u16) -> bool {
     }
 }
 
-fn scan(ip: std::net::Ipv4Addr, port: u16, scan_type: ScanType) -> Result<bool, Box<dyn Error>> {
+fn scan(ip: IpAddr, port: u16, scan_type: ScanType) -> Result<bool, Box<dyn Error>> {
     match scan_type {
         ScanType::Syn => scan_syn(ip, port),
         ScanType::Connect => Ok(scan_connect(ip, port)),
     }
 }
 
-fn hostname_to_ip(hostname: &String) -> Result<std::net::Ipv4Addr, Box<dyn Error>> {
-    if let Ok(ip) = hostname.parse::<std::net::Ipv4Addr>() {
+fn hostname_to_ip(hostname: &String) -> Result<IpAddr, Box<dyn Error>> {
+    // Try to parse as IP address first
+    if let Ok(ip) = hostname.parse::<IpAddr>() {
         return Ok(ip);
     }
-    if hostname.parse::<std::net::Ipv6Addr>().is_ok() {
-        return Err("IPv6 is not yet supported".into());
-    }
-    let ip: IntoIter<std::net::SocketAddr>;
+    
+    // Otherwise resolve hostname
+    let mut ip_iter: IntoIter<std::net::SocketAddr>;
     if !hostname.contains(":") {
-        ip = format!("{}:0", hostname).to_socket_addrs()?;
+        ip_iter = format!("{}:0", hostname).to_socket_addrs()?;
     } else {
-        ip = hostname
-            .to_socket_addrs()?;
+        ip_iter = hostname.to_socket_addrs()?;
     }
-    for addr in ip.into_iter() {
-        if let std::net::SocketAddr::V4(addr) = addr {
-            return Ok(*addr.ip());
-        }
+    
+    if let Some(addr) = ip_iter.next() {
+        return Ok(addr.ip());
     }
-    Err("Could not resolve hostname to IPv4 address".into())
+    
+    Err("Could not resolve hostname to IP address".into())
 }
 
 fn main() {
