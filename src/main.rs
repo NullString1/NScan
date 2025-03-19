@@ -25,22 +25,22 @@ impl Display for ScanType {
     }
 }
 
-// Rust port scanner
+/// Simple port scanner written in rust. Supports SYN, Connect, and FIN scans.
 #[derive(Parser)]
 struct Cli {
-    // IP address, hostname, or CIDR range to scan
     #[clap(short = 'H', long)]
+    /// IP address, hostname, or CIDR range to scan
     host: String,
 
-    // Port to scan
+    /// Port to scan
     #[clap(short, long, default_value = "80")]
     port: u16,
 
-    // Scan type
+    /// Scan type
     #[clap(short, long, default_value = "syn")]
     scan_type: ScanType,
 
-    // Timeout in seconds (max 255)
+    /// Timeout in seconds (max 255)
     #[clap(short, long, default_value = "1")]
     timeout: u8,
 }
