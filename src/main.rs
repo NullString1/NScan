@@ -1,0 +1,92 @@
+use clap::Parser;
+use pnet::{
+    packet::tcp,
+    transport::tcp_packet_iter,
+};
+// Rust port scanner
+#[derive(Parser)]
+struct Cli {
+    // Ip address to scan
+    #[clap(short, long)]
+    ip: std::net::Ipv4Addr,
+    // Port to scan
+    #[clap(short, long, default_value = "80")]
+    port: u16,
+}
+
+fn scan_syn(ip: std::net::Ipv4Addr, port: u16) -> bool {
+    let protocol = pnet::transport::TransportChannelType::Layer4(
+        pnet::transport::TransportProtocol::Ipv4(pnet::packet::ip::IpNextHeaderProtocols::Tcp),
+    );
+    let (mut tx, mut rx) = pnet::transport::transport_channel(1024, protocol)
+        .expect("Could not create transport channel");
+
+    let mut buf = [0u8; tcp::TcpPacket::minimum_packet_size()];
+    let mut packet = tcp::MutableTcpPacket::new(&mut buf).unwrap();
+
+    let src_port = rand::random::<u16>();
+
+    packet.set_destination(port);
+    packet.set_source(src_port);
+    packet.set_sequence(rand::random::<u32>());
+    packet.set_acknowledgement(0);
+    packet.set_reserved(0);
+    packet.set_options(&[]);
+    packet.set_data_offset(5);
+    packet.set_flags(tcp::TcpFlags::SYN);
+    packet.set_window(64240);
+
+    let checksum = tcp::ipv4_checksum(&packet.to_immutable(), &ip, &ip);
+    packet.set_checksum(checksum);
+
+    tx.send_to(packet.to_immutable(), ip.into())
+        .expect("Could not send packet");
+
+    loop {
+        let mut res = tcp_packet_iter(&mut rx);
+        let result = res
+            .next_with_timeout(std::time::Duration::from_secs(1))
+            .expect("Failed to receive packet");
+        match result {
+            Some(p) => {
+                let packet = p.0;
+                if packet.get_destination() == src_port && packet.get_source() == port {
+                    if packet.get_flags() == tcp::TcpFlags::SYN | tcp::TcpFlags::ACK {
+                        println!("Port {} is open", port);
+                        return true;
+                    } else {
+                        println!("Port {} is closed", port);
+                        return false;
+                    }
+                }
+            }
+            None => {
+                println!("Port {} is filtered", port);
+                return false;
+            }
+        }
+    }
+}
+
+fn scan_connect(ip: std::net::Ipv4Addr, port: u16) -> bool {
+    let socket_addr = std::net::SocketAddr::new(ip.into(), port);
+    let socket = std::net::TcpStream::connect_timeout(&socket_addr, std::time::Duration::from_secs(1));
+    match socket {
+        Ok(_) => {
+            println!("Port {} is open", port);
+            true
+        }
+        Err(_) => {
+            println!("Port {} is closed", port);
+            false
+        }
+    }
+}
+
+
+fn main() {
+    let args = Cli::parse();
+    println!("Scanning to {} on port {}", args.ip, args.port);
+    scan_syn(args.ip, args.port);
+    //scan_connect(args.ip, args.port);
+}
