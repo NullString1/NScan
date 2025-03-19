@@ -35,16 +35,20 @@ struct Cli {
     // Scan type
     #[clap(short, long, default_value = "syn")]
     scan_type: ScanType,
+    
+    // Timeout in seconds (max 255)
+    #[clap(short, long, default_value = "1")]
+    timeout: u8,
 }
 
-fn scan_syn(ip: IpAddr, port: u16) -> Result<bool, Box<dyn std::error::Error>> {
+fn scan_syn(ip: IpAddr, port: u16, timeout: u8) -> Result<bool, Box<dyn std::error::Error>> {
     match ip {
-        IpAddr::V4(ipv4) => scan_syn_ipv4(ipv4, port),
-        IpAddr::V6(ipv6) => scan_syn_ipv6(ipv6, port),
+        IpAddr::V4(ipv4) => scan_syn_ipv4(ipv4, port, timeout),
+        IpAddr::V6(ipv6) => scan_syn_ipv6(ipv6, port, timeout),
     }
 }
 
-fn scan_syn_ipv4(ip: Ipv4Addr, port: u16) -> Result<bool, Box<dyn std::error::Error>> {
+fn scan_syn_ipv4(ip: Ipv4Addr, port: u16, timeout: u8) -> Result<bool, Box<dyn std::error::Error>> {
     let protocol = TransportChannelType::Layer4(
         TransportProtocol::Ipv4(IpNextHeaderProtocols::Tcp),
     );
@@ -74,7 +78,7 @@ fn scan_syn_ipv4(ip: Ipv4Addr, port: u16) -> Result<bool, Box<dyn std::error::Er
     loop {
         let mut res = tcp_packet_iter(&mut rx);
         let result = res
-            .next_with_timeout(std::time::Duration::from_secs(1))
+            .next_with_timeout(std::time::Duration::from_secs(timeout.into()))
             .expect("Failed to receive packet");
         match result {
             Some(p) => {
@@ -97,7 +101,7 @@ fn scan_syn_ipv4(ip: Ipv4Addr, port: u16) -> Result<bool, Box<dyn std::error::Er
     }
 }
 
-fn scan_syn_ipv6(ip: Ipv6Addr, port: u16) -> Result<bool, Box<dyn std::error::Error>> {
+fn scan_syn_ipv6(ip: Ipv6Addr, port: u16, timeout: u8) -> Result<bool, Box<dyn std::error::Error>> {
     let protocol = TransportChannelType::Layer4(
         TransportProtocol::Ipv6(IpNextHeaderProtocols::Tcp),
     );
@@ -127,7 +131,7 @@ fn scan_syn_ipv6(ip: Ipv6Addr, port: u16) -> Result<bool, Box<dyn std::error::Er
     loop {
         let mut res = tcp_packet_iter(&mut rx);
         let result = res
-            .next_with_timeout(std::time::Duration::from_secs(1))
+            .next_with_timeout(std::time::Duration::from_secs(timeout.into()))
             .expect("Failed to receive packet");
         match result {
             Some(p) => {
@@ -150,10 +154,10 @@ fn scan_syn_ipv6(ip: Ipv6Addr, port: u16) -> Result<bool, Box<dyn std::error::Er
     }
 }
 
-fn scan_connect(ip: IpAddr, port: u16) -> bool {
+fn scan_connect(ip: IpAddr, port: u16, timeout: u8) -> bool {
     let socket_addr = std::net::SocketAddr::new(ip, port);
     let socket =
-        std::net::TcpStream::connect_timeout(&socket_addr, std::time::Duration::from_secs(1));
+        std::net::TcpStream::connect_timeout(&socket_addr, std::time::Duration::from_secs(timeout.into()));
     match socket {
         Ok(_) => {
             println!("Port {} is open", port);
@@ -166,10 +170,10 @@ fn scan_connect(ip: IpAddr, port: u16) -> bool {
     }
 }
 
-fn scan(ip: IpAddr, port: u16, scan_type: ScanType) -> Result<bool, Box<dyn Error>> {
+fn scan(ip: IpAddr, port: u16, scan_type: ScanType, timeout: u8) -> Result<bool, Box<dyn Error>> {
     match scan_type {
-        ScanType::Syn => scan_syn(ip, port),
-        ScanType::Connect => Ok(scan_connect(ip, port)),
+        ScanType::Syn => scan_syn(ip, port, timeout),
+        ScanType::Connect => Ok(scan_connect(ip, port, timeout)),
     }
 }
 
@@ -198,10 +202,10 @@ fn main() {
     let args = Cli::parse();
     let ip = hostname_to_ip(&args.host).unwrap();
     println!(
-        "Scanning {} ({}) on port {} using method {}",
-        args.host, ip, args.port, args.scan_type
+        "Scanning {} ({}) on port {} using method {} with timeout {} seconds",
+        args.host, ip, args.port, args.scan_type, args.timeout
     );
-    match scan(ip, args.port, args.scan_type) {
+    match scan(ip, args.port, args.scan_type, args.timeout) {
         Ok(_) => {}
         Err(e) => eprintln!("Error: {}", e),
     }
