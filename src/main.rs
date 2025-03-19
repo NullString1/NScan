@@ -1,7 +1,7 @@
-use std::fmt::Display;
+use std::{error::Error, fmt::Display};
 use clap::{Parser, ValueEnum};
 use pnet::{
-    packet::{ip, tcp},
+    packet::tcp,
     transport::tcp_packet_iter,
 };
 
@@ -35,12 +35,11 @@ struct Cli {
     scan_type: ScanType,
 }
 
-fn scan_syn(ip: std::net::Ipv4Addr, port: u16) -> bool {
+fn scan_syn(ip: std::net::Ipv4Addr, port: u16) -> Result<bool, Box<dyn std::error::Error>> {
     let protocol = pnet::transport::TransportChannelType::Layer4(
         pnet::transport::TransportProtocol::Ipv4(pnet::packet::ip::IpNextHeaderProtocols::Tcp),
     );
-    let (mut tx, mut rx) = pnet::transport::transport_channel(1024, protocol)
-        .expect("Could not create transport channel");
+    let (mut tx, mut rx) = pnet::transport::transport_channel(1024, protocol)?;
 
     let mut buf = [0u8; tcp::TcpPacket::minimum_packet_size()];
     let mut packet = tcp::MutableTcpPacket::new(&mut buf).unwrap();
@@ -74,16 +73,16 @@ fn scan_syn(ip: std::net::Ipv4Addr, port: u16) -> bool {
                 if packet.get_destination() == src_port && packet.get_source() == port {
                     if packet.get_flags() == tcp::TcpFlags::SYN | tcp::TcpFlags::ACK {
                         println!("Port {} is open", port);
-                        return true;
+                        return Ok(true);
                     } else {
                         println!("Port {} is closed", port);
-                        return false;
+                        return Ok(false);
                     }
                 }
             }
             None => {
                 println!("Port {} is filtered", port);
-                return false;
+                return Ok(false);
             }
         }
     }
@@ -105,10 +104,10 @@ fn scan_connect(ip: std::net::Ipv4Addr, port: u16) -> bool {
     }
 }
 
-fn scan(ip: std::net::Ipv4Addr, port: u16, scan_type: ScanType) -> bool {
+fn scan(ip: std::net::Ipv4Addr, port: u16, scan_type: ScanType) -> Result<bool, Box<dyn Error>> {
     match scan_type {
         ScanType::Syn => scan_syn(ip, port),
-        ScanType::Connect => scan_connect(ip, port),
+        ScanType::Connect => Ok(scan_connect(ip, port)),
     }
 }
 
@@ -118,5 +117,9 @@ fn main() {
         "Scanning {} on port {} using method {}",
         args.ip, args.port, args.scan_type
     );
-    scan(args.ip, args.port, args.scan_type);
+    match scan(args.ip, args.port, args.scan_type)
+    {
+        Ok(_) => {}
+        Err(e) => eprintln!("Error: {}", e),
+    }
 }
