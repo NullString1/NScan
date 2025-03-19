@@ -1,15 +1,21 @@
 use clap::{Parser, ValueEnum};
 use pnet::{
-    packet::tcp,
     packet::ip::IpNextHeaderProtocols,
+    packet::tcp,
     transport::{tcp_packet_iter, TransportChannelType, TransportProtocol},
 };
-use std::{error::Error, fmt::Display, net::{IpAddr, ToSocketAddrs, Ipv4Addr, Ipv6Addr}, vec::IntoIter};
+use std::{
+    error::Error,
+    fmt::Display,
+    net::{IpAddr, Ipv4Addr, Ipv6Addr, ToSocketAddrs},
+    vec::IntoIter,
+};
 
-#[derive(Debug, Clone, ValueEnum)]
+#[derive(Debug, Clone, ValueEnum, PartialEq)]
 enum ScanType {
     Syn,
     Connect,
+    Fin,
 }
 
 impl Display for ScanType {
@@ -17,6 +23,7 @@ impl Display for ScanType {
         match self {
             ScanType::Syn => write!(f, "SYN"),
             ScanType::Connect => write!(f, "Connect"),
+            ScanType::Fin => write!(f, "FIN"),
         }
     }
 }
@@ -35,23 +42,32 @@ struct Cli {
     // Scan type
     #[clap(short, long, default_value = "syn")]
     scan_type: ScanType,
-    
+
     // Timeout in seconds (max 255)
     #[clap(short, long, default_value = "1")]
     timeout: u8,
 }
 
-fn scan_syn(ip: IpAddr, port: u16, timeout: u8) -> Result<bool, Box<dyn std::error::Error>> {
+fn scan_raw(
+    ip: IpAddr,
+    port: u16,
+    timeout: u8,
+    st: ScanType,
+) -> Result<bool, Box<dyn std::error::Error>> {
     match ip {
-        IpAddr::V4(ipv4) => scan_syn_ipv4(ipv4, port, timeout),
-        IpAddr::V6(ipv6) => scan_syn_ipv6(ipv6, port, timeout),
+        IpAddr::V4(ipv4) => scan_raw_ipv4(ipv4, port, timeout, st),
+        IpAddr::V6(ipv6) => scan_raw_ipv6(ipv6, port, timeout, st),
     }
 }
 
-fn scan_syn_ipv4(ip: Ipv4Addr, port: u16, timeout: u8) -> Result<bool, Box<dyn std::error::Error>> {
-    let protocol = TransportChannelType::Layer4(
-        TransportProtocol::Ipv4(IpNextHeaderProtocols::Tcp),
-    );
+fn scan_raw_ipv4(
+    ip: Ipv4Addr,
+    port: u16,
+    timeout: u8,
+    scan_type: ScanType,
+) -> Result<bool, Box<dyn std::error::Error>> {
+    let protocol =
+        TransportChannelType::Layer4(TransportProtocol::Ipv4(IpNextHeaderProtocols::Tcp));
     let (mut tx, mut rx) = pnet::transport::transport_channel(1024, protocol)?;
 
     let mut buf = [0u8; tcp::TcpPacket::minimum_packet_size()];
@@ -66,7 +82,13 @@ fn scan_syn_ipv4(ip: Ipv4Addr, port: u16, timeout: u8) -> Result<bool, Box<dyn s
     packet.set_reserved(0);
     packet.set_options(&[]);
     packet.set_data_offset(5);
-    packet.set_flags(tcp::TcpFlags::SYN);
+    if scan_type == ScanType::Fin {
+        packet.set_flags(tcp::TcpFlags::FIN);
+    } else if scan_type == ScanType::Syn {
+        packet.set_flags(tcp::TcpFlags::SYN);
+    } else {
+        return Err("Connect scan not supported for raw packets".into());
+    }
     packet.set_window(64240);
 
     let checksum = tcp::ipv4_checksum(&packet.to_immutable(), &ip, &ip);
@@ -84,27 +106,45 @@ fn scan_syn_ipv4(ip: Ipv4Addr, port: u16, timeout: u8) -> Result<bool, Box<dyn s
             Some(p) => {
                 let packet = p.0;
                 if packet.get_destination() == src_port && packet.get_source() == port {
-                    if packet.get_flags() == tcp::TcpFlags::SYN | tcp::TcpFlags::ACK {
-                        println!("Port {} is open", port);
-                        return Ok(true);
+                    if scan_type == ScanType::Syn {
+                        if packet.get_flags() == tcp::TcpFlags::SYN | tcp::TcpFlags::ACK {
+                            println!("Port {} is open", port);
+                            return Ok(true);
+                        } else {
+                            println!("Port {} is closed", port);
+                            return Ok(false);
+                        }
                     } else {
-                        println!("Port {} is closed", port);
-                        return Ok(false);
+                        if packet.get_flags() == tcp::TcpFlags::RST | tcp::TcpFlags::ACK {
+                            println!("Port {} is closed", port);
+                            return Ok(false);
+                        } else {
+                            println!("Port {} is unknown. Received unexpected packet", port);
+                            return Ok(false);
+                        }
                     }
                 }
             }
             None => {
-                println!("Port {} is filtered", port);
-                return Ok(false);
+                if scan_type == ScanType::Syn {
+                    println!("Port {} is filtered", port);
+                    return Ok(false);
+                } 
+                println!("Port {} is open", port); // No response to FIN packet means port is open
+                return Ok(true);
             }
         }
     }
 }
 
-fn scan_syn_ipv6(ip: Ipv6Addr, port: u16, timeout: u8) -> Result<bool, Box<dyn std::error::Error>> {
-    let protocol = TransportChannelType::Layer4(
-        TransportProtocol::Ipv6(IpNextHeaderProtocols::Tcp),
-    );
+fn scan_raw_ipv6(
+    ip: Ipv6Addr,
+    port: u16,
+    timeout: u8,
+    scan_type: ScanType,
+) -> Result<bool, Box<dyn std::error::Error>> {
+    let protocol =
+        TransportChannelType::Layer4(TransportProtocol::Ipv6(IpNextHeaderProtocols::Tcp));
     let (mut tx, mut rx) = pnet::transport::transport_channel(1024, protocol)?;
 
     let mut buf = [0u8; tcp::TcpPacket::minimum_packet_size()];
@@ -119,7 +159,13 @@ fn scan_syn_ipv6(ip: Ipv6Addr, port: u16, timeout: u8) -> Result<bool, Box<dyn s
     packet.set_reserved(0);
     packet.set_options(&[]);
     packet.set_data_offset(5);
-    packet.set_flags(tcp::TcpFlags::SYN);
+    if scan_type == ScanType::Fin {
+        packet.set_flags(tcp::TcpFlags::FIN);
+    } else if scan_type == ScanType::Syn {
+        packet.set_flags(tcp::TcpFlags::SYN);
+    } else {
+        return Err("Connect scan not supported for raw packets".into());
+    }
     packet.set_window(64240);
 
     let checksum = tcp::ipv6_checksum(&packet.to_immutable(), &ip, &ip);
@@ -137,18 +183,32 @@ fn scan_syn_ipv6(ip: Ipv6Addr, port: u16, timeout: u8) -> Result<bool, Box<dyn s
             Some(p) => {
                 let packet = p.0;
                 if packet.get_destination() == src_port && packet.get_source() == port {
-                    if packet.get_flags() == tcp::TcpFlags::SYN | tcp::TcpFlags::ACK {
-                        println!("Port {} is open", port);
-                        return Ok(true);
+                    if scan_type == ScanType::Syn {
+                        if packet.get_flags() == tcp::TcpFlags::SYN | tcp::TcpFlags::ACK {
+                            println!("Port {} is open", port);
+                            return Ok(true);
+                        } else {
+                            println!("Port {} is closed", port);
+                            return Ok(false);
+                        }
                     } else {
-                        println!("Port {} is closed", port);
-                        return Ok(false);
+                        if packet.get_flags() == tcp::TcpFlags::RST | tcp::TcpFlags::ACK {
+                            println!("Port {} is closed", port);
+                            return Ok(false);
+                        } else {
+                            println!("Port {} is unknown. Received unexpected packet", port);
+                            return Ok(false);
+                        }
                     }
                 }
             }
             None => {
-                println!("Port {} is filtered", port);
-                return Ok(false);
+                if scan_type == ScanType::Syn {
+                    println!("Port {} is filtered", port);
+                    return Ok(false);
+                } 
+                println!("Port {} is open", port); // No response to FIN packet means port is open
+                return Ok(true);
             }
         }
     }
@@ -156,8 +216,10 @@ fn scan_syn_ipv6(ip: Ipv6Addr, port: u16, timeout: u8) -> Result<bool, Box<dyn s
 
 fn scan_connect(ip: IpAddr, port: u16, timeout: u8) -> bool {
     let socket_addr = std::net::SocketAddr::new(ip, port);
-    let socket =
-        std::net::TcpStream::connect_timeout(&socket_addr, std::time::Duration::from_secs(timeout.into()));
+    let socket = std::net::TcpStream::connect_timeout(
+        &socket_addr,
+        std::time::Duration::from_secs(timeout.into()),
+    );
     match socket {
         Ok(_) => {
             println!("Port {} is open", port);
@@ -172,8 +234,9 @@ fn scan_connect(ip: IpAddr, port: u16, timeout: u8) -> bool {
 
 fn scan(ip: IpAddr, port: u16, scan_type: ScanType, timeout: u8) -> Result<bool, Box<dyn Error>> {
     match scan_type {
-        ScanType::Syn => scan_syn(ip, port, timeout),
+        ScanType::Syn => scan_raw(ip, port, timeout, scan_type),
         ScanType::Connect => Ok(scan_connect(ip, port, timeout)),
+        ScanType::Fin => scan_raw(ip, port, timeout, scan_type),
     }
 }
 
@@ -182,7 +245,7 @@ fn hostname_to_ip(hostname: &String) -> Result<IpAddr, Box<dyn Error>> {
     if let Ok(ip) = hostname.parse::<IpAddr>() {
         return Ok(ip);
     }
-    
+
     // Otherwise resolve hostname
     let mut ip_iter: IntoIter<std::net::SocketAddr>;
     if !hostname.contains(":") {
@@ -190,11 +253,11 @@ fn hostname_to_ip(hostname: &String) -> Result<IpAddr, Box<dyn Error>> {
     } else {
         ip_iter = hostname.to_socket_addrs()?;
     }
-    
+
     if let Some(addr) = ip_iter.next() {
         return Ok(addr.ip());
     }
-    
+
     Err("Could not resolve hostname to IP address".into())
 }
 
