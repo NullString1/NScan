@@ -1,9 +1,6 @@
-use std::{error::Error, fmt::Display};
 use clap::{Parser, ValueEnum};
-use pnet::{
-    packet::tcp,
-    transport::tcp_packet_iter,
-};
+use pnet::{packet::tcp, transport::tcp_packet_iter};
+use std::{error::Error, fmt::Display, net::ToSocketAddrs, vec::IntoIter};
 
 #[derive(Debug, Clone, ValueEnum)]
 enum ScanType {
@@ -24,8 +21,9 @@ impl Display for ScanType {
 #[derive(Parser)]
 struct Cli {
     // Ip address to scan
-    #[clap(short, long)]
-    ip: std::net::Ipv4Addr,
+    #[clap(short = 'H', long)]
+    host: String,
+
     // Port to scan
     #[clap(short, long, default_value = "80")]
     port: u16,
@@ -111,14 +109,36 @@ fn scan(ip: std::net::Ipv4Addr, port: u16, scan_type: ScanType) -> Result<bool, 
     }
 }
 
+fn hostname_to_ip(hostname: &String) -> Result<std::net::Ipv4Addr, Box<dyn Error>> {
+    if let Ok(ip) = hostname.parse::<std::net::Ipv4Addr>() {
+        return Ok(ip);
+    }
+    if hostname.parse::<std::net::Ipv6Addr>().is_ok() {
+        return Err("IPv6 is not yet supported".into());
+    }
+    let ip: IntoIter<std::net::SocketAddr>;
+    if !hostname.contains(":") {
+        ip = format!("{}:0", hostname).to_socket_addrs()?;
+    } else {
+        ip = hostname
+            .to_socket_addrs()?;
+    }
+    for addr in ip.into_iter() {
+        if let std::net::SocketAddr::V4(addr) = addr {
+            return Ok(*addr.ip());
+        }
+    }
+    Err("Could not resolve hostname to IPv4 address".into())
+}
+
 fn main() {
     let args = Cli::parse();
+    let ip = hostname_to_ip(&args.host).unwrap();
     println!(
-        "Scanning {} on port {} using method {}",
-        args.ip, args.port, args.scan_type
+        "Scanning {} ({}) on port {} using method {}",
+        args.host, ip, args.port, args.scan_type
     );
-    match scan(args.ip, args.port, args.scan_type)
-    {
+    match scan(ip, args.port, args.scan_type) {
         Ok(_) => {}
         Err(e) => eprintln!("Error: {}", e),
     }
