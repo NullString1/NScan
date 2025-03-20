@@ -9,4 +9,5 @@ pnet = "0.35.0"
 rand = "0.9.0"
 cidr = "0.2.2"
 colored = "3.0.0"
-tokio = { version = "1.44.1", features = ["net", "macros", "rt", "sync"] }
+tokio = { version = "1.44.1", features = ["net", "macros", "rt-multi-thread", "sync"] }
+chrono = "0.4.40"
